@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csye7374-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: csye7374-operator
+  template:
+    metadata:
+      labels:
+        name: csye7374-operator
+    spec:
+      serviceAccountName: csye7374-operator
+      containers:
+        - name: csye7374-operator
+          # Replace this with the built image name
+          image: REPLACE_IMAGE
+          command:
+          - csye7374-operator
+          imagePullPolicy: Always
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPERATOR_NAME
+              value: "csye7374-operator"
