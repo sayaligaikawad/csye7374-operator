@@ -2,9 +2,10 @@ package application
 
 import (
 	"context"
+	"fmt"
 
 	applicationv1alpha1 "github.com/sayaligaikawad/csye7374-operator/pkg/apis/application/v1alpha1"
-
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,6 +22,9 @@ import (
 )
 
 var log = logf.Log.WithName("controller_application")
+
+var updateApplication = false
+var applicationStatusUpdated = false
 
 /**
 * USER ACTION REQUIRED: This is a scaffold file intended for the user to modify with their own Controller
@@ -53,8 +57,8 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// TODO(user): Modify this to be the types you create that are owned by the primary resource
-	// Watch for changes to secondary resource Pods and requeue the owner Application
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &handler.EnqueueRequestForOwner{
+	// Watch for changes to secondary resource Deployment and requeue the owner Application
+	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForOwner{
 		IsController: true,
 		OwnerType:    &applicationv1alpha1.Application{},
 	})
@@ -78,7 +82,7 @@ type ReconcileApplication struct {
 // Reconcile reads that state of the cluster for a Application object and makes changes based on the state read
 // and what is in the Application.Spec
 // TODO(user): Modify this Reconcile function to implement your Controller logic.  This example creates
-// a Pod as an example
+// a Deployment as an example
 // Note:
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
@@ -100,54 +104,130 @@ func (r *ReconcileApplication) Reconcile(request reconcile.Request) (reconcile.R
 		return reconcile.Result{}, err
 	}
 
-	// Define a new Pod object
-	pod := newPodForCR(instance)
+	// Define a new deployment object
+	deployment := newDeploymentCR(instance)
 
 	// Set Application instance as the owner and controller
-	if err := controllerutil.SetControllerReference(instance, pod, r.scheme); err != nil {
+	if err := controllerutil.SetControllerReference(instance, deployment, r.scheme); err != nil {
 		return reconcile.Result{}, err
 	}
 
-	// Check if this Pod already exists
-	found := &corev1.Pod{}
-	err = r.client.Get(context.TODO(), types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, found)
+	// Check if this Deployment already exists
+	found := &appsv1.Deployment{}
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: deployment.Name, Namespace: deployment.Namespace}, found)
 	if err != nil && errors.IsNotFound(err) {
-		reqLogger.Info("Creating a new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-		err = r.client.Create(context.TODO(), pod)
+		reqLogger.Info("Creating a new Deployment", "Deployment.Namespace", deployment.Namespace, "Deployment.Name", deployment.Name)
+		err = r.client.Create(context.TODO(), deployment)
 		if err != nil {
 			return reconcile.Result{}, err
 		}
 
-		// Pod created successfully - don't requeue
+		// Deployment created successfully - don't requeue
 		return reconcile.Result{}, nil
 	} else if err != nil {
 		return reconcile.Result{}, err
 	}
 
-	// Pod already exists - don't requeue
-	reqLogger.Info("Skip reconcile: Pod already exists", "Pod.Namespace", found.Namespace, "Pod.Name", found.Name)
+	if int(*found.Spec.Replicas) != int(instance.Spec.Replicas) {
+		reqLogger.Info(fmt.Sprintf("Replica miss match updating %v != %v", *found.Spec.Replicas, instance.Spec.Replicas))
+		updateApplication = updateDeploymentReplicas(instance, found)
+	}
+	if found.Spec.Template.Spec.Containers[0].Image != instance.Spec.ApplicationVersion {
+		reqLogger.Info("Application version miss match updating %v != %v", found.Spec.Template.Spec.Containers[0].Image, instance.Spec.ApplicationVersion)
+		updateApplication = updateDeploymentAppVersion(instance, found)
+	}
+
+	if updateApplication == true {
+		err = r.client.Update(context.TODO(), found)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+
+		objectKey, err := client.ObjectKeyFromObject(found)
+		if err != nil {
+			reqLogger.Error(err, "Unable to get name and namespace of Deployment object")
+			return reconcile.Result{}, err
+		}
+
+		err = r.client.Get(context.TODO(), objectKey, found)
+		if err != nil {
+			reqLogger.Error(err, "Unable to update Deployment object")
+			return reconcile.Result{}, err
+		}
+
+		applicationStatusUpdated = updateApplicationStatus(instance, found)
+
+		if applicationStatusUpdated == true {
+			err = r.client.Status().Update(context.TODO(), found)
+			if err != nil {
+				reqLogger.Error(err, "Unable to update CR status")
+				return reconcile.Result{}, err
+			}
+		}
+		// Deployment exists and was updated - don't requeue
+		reqLogger.Info("Skip reconcile: Deployment exists and was updated", "Deployment.Namespace", found.Namespace, "Deployment.Name", found.Name)
+		return reconcile.Result{}, nil
+	}
+
+	// Deployment already exists and there are no changes - don't requeue
+	reqLogger.Info("Skip reconcile: Deployment already exists but no changes", "Deployment.Namespace", found.Namespace, "Deployment.Name", found.Name)
 	return reconcile.Result{}, nil
 }
 
-// newPodForCR returns a busybox pod with the same name/namespace as the cr
-func newPodForCR(cr *applicationv1alpha1.Application) *corev1.Pod {
+// newDeploymentCR returns a busybox pod with the same name/namespace as the cr
+func newDeploymentCR(cr *applicationv1alpha1.Application) *appsv1.Deployment {
+	applicationVersion := cr.Spec.ApplicationVersion
 	labels := map[string]string{
 		"app": cr.Name,
 	}
-	return &corev1.Pod{
+	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      cr.Name + "-pod",
+			Name:      cr.Name + "-deployment",
 			Namespace: cr.Namespace,
-			Labels:    labels,
 		},
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{
-				{
-					Name:    "busybox",
-					Image:   "busybox",
-					Command: []string{"sleep", "3600"},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: int32Ptr(cr.Spec.Replicas),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: labels,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "web",
+							Image: applicationVersion,
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "http",
+									Protocol:      corev1.ProtocolTCP,
+									ContainerPort: 80,
+								},
+							},
+						},
+					},
 				},
 			},
 		},
 	}
 }
+
+func updateDeploymentReplicas(cr *applicationv1alpha1.Application, deployment *appsv1.Deployment) bool {
+	deployment.Spec.Replicas = int32Ptr(cr.Spec.Replicas)
+	return true
+}
+
+func updateDeploymentAppVersion(cr *applicationv1alpha1.Application, deployment *appsv1.Deployment) bool {
+	deployment.Spec.Template.Spec.Containers[0].Image = cr.Spec.ApplicationVersion
+	return true
+}
+
+func updateApplicationStatus(cr *applicationv1alpha1.Application, deployment *appsv1.Deployment) bool {
+	cr.Status.Replicas = *deployment.Spec.Replicas
+	cr.Status.ApplicationVersion = deployment.Spec.Template.Spec.Containers[0].Image
+	return true
+}
+
+func int32Ptr(i int32) *int32 { return &i }

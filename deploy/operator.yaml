@@ -16,7 +16,7 @@ spec:
       containers:
         - name: csye7374-operator
           # Replace this with the built image name
-          image: REPLACE_IMAGE
+          image: 501702557048.dkr.ecr.us-east-1.amazonaws.com/operator
           command:
           - csye7374-operator
           imagePullPolicy: Always
